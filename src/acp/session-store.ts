@@ -1,6 +1,7 @@
 import fs from "node:fs";
 import os from "node:os";
 import path from "node:path";
+import { withStoreLock } from "./store-lock.js";
 
 export interface SavedSessionRecord {
 	piSessionId: string;
@@ -33,18 +34,20 @@ export class AcpSessionStore {
 	}
 
 	save(record: SavedSessionRecord): void {
-		const records = this.read().filter((candidate) => candidate.piSessionId !== record.piSessionId);
-		records.push(record);
-		records.sort((left, right) => right.lastActive - left.lastActive);
-		this.write(records.slice(0, MAX_RECORDS));
+		withStoreLock(this.file, () => {
+			const records = this.read().filter((candidate) => candidate.piSessionId !== record.piSessionId);
+			records.push(record);
+			records.sort((left, right) => right.lastActive - left.lastActive);
+			this.write(records.slice(0, MAX_RECORDS));
+		});
 	}
 
 	remove(piSessionId: string): void {
-		this.write(this.read().filter((record) => record.piSessionId !== piSessionId));
+		withStoreLock(this.file, () => this.write(this.read().filter((record) => record.piSessionId !== piSessionId)));
 	}
 
 	clear(): void {
-		fs.rmSync(this.file, { force: true });
+		withStoreLock(this.file, () => fs.rmSync(this.file, { force: true }));
 	}
 
 	private read(): SavedSessionRecord[] {

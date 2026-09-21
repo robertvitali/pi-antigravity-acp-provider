@@ -1,4 +1,6 @@
-export const PACKAGE_VERSION = "0.1.8";
+import packageJson from "../package.json" with { type: "json" };
+
+export const PACKAGE_VERSION = packageJson.version;
 export const ANTIGRAVITY_ACP_VERSION = "1.1.1";
 export const ACP_SDK_VERSION = "0.19.1";
 export const ACP_PROTOCOL_VERSION = 1;

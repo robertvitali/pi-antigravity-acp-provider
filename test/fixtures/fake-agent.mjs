@@ -42,6 +42,7 @@ for await (const line of rl) {
 		send({ jsonrpc: "2.0", id: permissionPromptId, result: { stopReason: "end_turn" } });
 		permissionPromptId = undefined;
 	} else if (method === "initialize") {
+		if (scenario === "initialize-timeout") continue;
 		if (scenario === "malformed-output") {
 			process.stdout.write("not-json\n");
 			continue;

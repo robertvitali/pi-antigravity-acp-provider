@@ -101,14 +101,16 @@ export class AntigravityAcpConnection {
 			options.initializeTimeoutMs ?? 30_000,
 			"initialize",
 		);
+		// Initialization can outlive a cancelled catalog refresh.
+		void this.initialized.catch(() => undefined);
 	}
 
 	setHandlers(handlers: AntigravityConnectionHandlers): void {
 		this.handlers = handlers;
 	}
 
-	async initialize(): Promise<InitializeResponse> {
-		const response = await this.initialized;
+	async initialize(signal?: AbortSignal): Promise<InitializeResponse> {
+		const response = await this.withAbort(this.initialized, signal);
 		if (response.protocolVersion !== PROTOCOL_VERSION) {
 			await this.close();
 			throw new AntigravityAcpError(
@@ -222,7 +224,7 @@ export class AntigravityAcpConnection {
 			const onAbort = () => {
 				if (aborting) return;
 				aborting = true;
-				void this.cancel(request.sessionId);
+				void this.cancel(request.sessionId).catch(() => undefined);
 				cancelTimer = setTimeout(() => {
 					void this.close().finally(() => finish(() => reject(abortError())));
 				}, 1_500);
@@ -248,6 +250,9 @@ export class AntigravityAcpConnection {
 	}
 
 	private async withAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+		// The operation has already started. Observe it before any cancellation
+		// branch closes the transport, even when we will not await its result.
+		void promise.catch(() => undefined);
 		if (!signal) return promise;
 		if (signal.aborted) {
 			await this.close();

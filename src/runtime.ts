@@ -157,10 +157,12 @@ export class AntigravityRuntime {
 
 	async discoverModels(apiKey: string | undefined, signal?: AbortSignal): Promise<ModelInfo[]> {
 		this.assertActive();
+		if (signal?.aborted) throw abortError();
 		if (this.ensureAgent) await ensureAntigravityAcpReady();
+		if (signal?.aborted) throw abortError();
 		const connection = this.connectionFactory({ cwd: process.cwd() });
 		try {
-			const initialize = await connection.initialize();
+			const initialize = await connection.initialize(signal);
 			await authenticateForCredential(connection, initialize, apiKey, signal);
 			const session = await connection.newSession(process.cwd(), signal);
 			return session.models?.availableModels ?? [];
