@@ -134,3 +134,37 @@ Earlier repository documents analyzing `@google/gemini-cli@0.58.0` describe the 
 ## License
 
 MIT
+
+
+### Opt-in cleanup for a Pi-owned ACP profile
+
+`resolveHistorySupervisorLaunch()` selects a macOS-only supervisor using the
+fixed `/usr/bin/python3` interpreter (Python 3.9 or newer), isolated mode, and
+no bytecode cache. The owned Pi integration must explicitly select it and pass
+its returned `shutdownGraceMs` along with the launch arguments. Default adapter
+launches retain their existing behavior.
+
+Enable this only when the existing ACP profile is exclusively used by Pi and
+all older ACP runtimes have stopped. Concurrent Pi runtimes remain supported.
+After the last recorded runtime group exits, the supervisor clears the contents
+of `GEMINI_HOME/antigravity-acp/conversations` and `brain` (default home:
+`~/.gemini`). It preserves OAuth credentials, settings, unrelated files, and the
+shared `GEMINI_HOME/artifacts` directory. No login migration or token copies are
+performed.
+
+A kernel lock coordinates admission and deletion. A gate records each runtime
+group before allowing ACP to execute, including startup that never returns a
+session ID. Interrupted cleanup is retried on the next launch. Another live recorded owner defers deletion until that owner finishes, without
+an error. A surviving group without a live owner, unsafe paths, identity changes,
+lock timeouts, and deletion errors preserve history and emit a sanitized
+diagnostic with a nonzero exit.
+The existing `close()` method remains nonthrowing; inspect `ProcessExit.code`
+and `stderrTail` for deferred cleanup. A stopped process alone is not proof that
+history was removed. History may remain while other runtimes are active, after
+a machine crash until the next launch, or while an ambiguous process group
+blocks cleanup. Processes that escape their group and arbitrary hook writes
+outside these two roots are outside this cleanup guarantee.
+
+Do not remove or replace the private `.pi-history-cleanup` coordination directory
+or its stable lock while runtimes are active. Corrupt records deliberately block
+automatic cleanup; investigate process ownership before repairing them.

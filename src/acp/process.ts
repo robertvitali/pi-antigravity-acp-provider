@@ -1,5 +1,6 @@
 import { type ChildProcessWithoutNullStreams, spawn } from "node:child_process";
 import path from "node:path";
+import { accessSync, constants } from "node:fs";
 import { Readable, Writable } from "node:stream";
 import { fileURLToPath } from "node:url";
 
@@ -16,6 +17,7 @@ export interface AntigravityProcessOptions {
 	command?: string;
 	args?: string[];
 	env?: NodeJS.ProcessEnv;
+	shutdownGraceMs?: number;
 }
 
 export interface ProcessExit {
@@ -44,8 +46,12 @@ export class AntigravityProcess {
 	private ignoredStdoutNoise = 0;
 	private settled = false;
 	private closing?: Promise<void>;
+	private readonly shutdownGraceMs: number;
+	private readonly hardKillWaitMs: number;
 
 	constructor(options: AntigravityProcessOptions) {
+		this.shutdownGraceMs = options.shutdownGraceMs ?? KILL_GRACE_MS;
+		this.hardKillWaitMs = options.shutdownGraceMs === undefined ? KILL_GRACE_MS : 1_000;
 		let command: string;
 		let args: string[];
 		if (options.command) {
@@ -123,11 +129,11 @@ export class AntigravityProcess {
 		this.signal("SIGTERM");
 		const exited = await Promise.race([
 			this.exited.then(() => true),
-			delay(KILL_GRACE_MS).then(() => false),
+			delay(this.shutdownGraceMs).then(() => false),
 		]);
 		if (!exited && this.alive) {
 			this.signal("SIGKILL");
-			await Promise.race([this.exited, delay(KILL_GRACE_MS)]);
+			await Promise.race([this.exited, delay(this.hardKillWaitMs)]);
 		}
 	}
 
@@ -173,4 +179,12 @@ function subscriptionEnvironment(input: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
   if (/^(GEMINI_API_KEY|GOOGLE_API_KEY|GOOGLE_APPLICATION_CREDENTIALS|GOOGLE_CLOUD_.*|GCLOUD_.*|CLOUDSDK_.*|AGY_ACP_CCPA_.*|AGY_ACP_ENABLE_OAUTH|GOOGLE_GENAI_USE_VERTEXAI|ANTIGRAVITY_HARNESS_PATH|NODE_OPTIONS|NODE_PATH|PYTHONPATH|PYTHONHOME|LD_PRELOAD|DYLD_.*)$/.test(key)) delete env[key];
  }
  return env;
+}
+
+/** Explicit opt-in for the Pi-owned ACP profile; does not change default launches. */
+export function resolveHistorySupervisorLaunch(): { command: string; args: string[]; shutdownGraceMs: number } {
+ if (process.platform !== "darwin") throw new Error("ACP history cleanup requires macOS /usr/bin/python3");
+ const command = "/usr/bin/python3";
+ accessSync(command, constants.X_OK);
+ return { command, args: ["-I", "-B", fileURLToPath(new URL("./history-supervisor.py", import.meta.url))], shutdownGraceMs: 10_000 };
 }
