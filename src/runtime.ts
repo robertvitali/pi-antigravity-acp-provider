@@ -40,7 +40,6 @@ import { PiEventWriter } from "./stream/pi-events.js";
 import { usageFromPrompt } from "./stream/usage.js";
 import { RuntimeMetrics } from "./status.js";
 
-const PERMISSION_TIMEOUT_MS = 120_000;
 const TOOL_TIMEOUT_MS = 120_000;
 const TOOL_BATCH_MS = 100;
 
@@ -138,7 +137,7 @@ export class AntigravityRuntime {
 
 	constructor(
 		connectionFactory?: AntigravityConnectionFactory,
-		permissionMode: PermissionMode = "yolo",
+		permissionMode: PermissionMode = "default",
 		sessionStore?: AcpSessionStore,
 	) {
 		this.connectionFactory = connectionFactory ?? ((options) => new AntigravityAcpConnection(options));
@@ -149,6 +148,10 @@ export class AntigravityRuntime {
 
 	stream(model: AntigravityModel, context: Context, options: SimpleStreamOptions = {}): PiEventWriter {
 		const writer = new PiEventWriter(model);
+		if (options.apiKey !== undefined && options.apiKey !== MANAGED_AUTH_MARKER) {
+			writer.fail(new AntigravityAcpError("auth", "This provider requires subscription OAuth; API keys are disabled"));
+			return writer;
+		}
 		void this.runQueued(model, context, options, writer).catch((error: unknown) => {
 			writer.fail(error, options.signal?.aborted === true || isAbort(error));
 		});
@@ -186,11 +189,7 @@ export class AntigravityRuntime {
 		});
 		try {
 			const initialize = await connection.initialize();
-			const method = initialize.authMethods?.find((candidate) =>
-				/log\s*in\s+with\s+google|google\s+account|oauth-personal/iu.test(
-					`${candidate.id} ${candidate.name}`,
-				),
-			);
+			const method = initialize.authMethods?.find((candidate) => candidate.id === "oauth-personal");
 			if (!method) throw new AntigravityAcpError("auth", "Antigravity ACP did not advertise Google login");
 			const authentication = connection.authenticate(
 				{ methodId: method.id },
@@ -233,20 +232,11 @@ export class AntigravityRuntime {
 	}
 
 	async verifyApiKey(
-		apiKey: string,
-		signal?: AbortSignal,
-		onProgress?: (message: string) => void,
+		_apiKey: string,
+		_signal?: AbortSignal,
+		_onProgress?: (message: string) => void,
 	): Promise<void> {
-		this.assertActive();
-		if (this.ensureAgent) await ensureAntigravityAcpReady(onProgress);
-		const connection = this.connectionFactory({ cwd: process.cwd() });
-		try {
-			const initialize = await connection.initialize();
-			await authenticateForCredential(connection, initialize, apiKey, signal);
-			await connection.newSession(process.cwd(), signal);
-		} finally {
-			await connection.close();
-		}
+		throw new AntigravityAcpError("auth", "This provider requires subscription OAuth; API keys are disabled");
 	}
 
 	async authHealth(apiKey?: string): Promise<AntigravityAuthHealth & { networkValid?: boolean; error?: string }> {
@@ -266,9 +256,13 @@ export class AntigravityRuntime {
 	}
 
 	async setPermissionMode(mode: PermissionMode): Promise<void> {
+		for (const binding of this.resolvedBindings) {
+			if (!supportsMode(binding.session, mode)) {
+				throw new AntigravityAcpError("protocol", `Antigravity ACP did not advertise requested mode ${mode}`);
+			}
+		}
 		await Promise.all(
 			[...this.resolvedBindings].map(async (binding) => {
-				if (!supportsMode(binding.session, mode)) return;
 				await binding.connection.setMode(binding.session.sessionId, mode);
 			}),
 		);
@@ -420,6 +414,7 @@ export class AntigravityRuntime {
 
 		let completeTurn: (() => void) | undefined;
 		try {
+			this.assertActive();
 			if (
 				context.messages.length < binding.messageCount ||
 				messagesFingerprint(context.messages.slice(0, binding.messageCount)) !==
@@ -539,6 +534,7 @@ export class AntigravityRuntime {
 		tools: Context["tools"],
 		signal?: AbortSignal,
 	): Promise<Binding> {
+		this.assertActive();
 		const existing = this.bindings.get(key);
 		if (existing) return existing;
 		const created = this.createBinding(key, model, acpModelId, apiKey, writer, tools ?? [], signal).catch((error) => {
@@ -605,11 +601,16 @@ export class AntigravityRuntime {
 				}
 			}
 			session ??= await connection.newSession(cwd, signal, mcpServers);
-			if (supportsMode(session, this.permissionMode) && session.modes?.currentModeId !== this.permissionMode) {
+			this.assertActive();
+			if (!supportsMode(session, this.permissionMode)) {
+				throw new AntigravityAcpError("protocol", `Antigravity ACP did not advertise requested mode ${this.permissionMode}`);
+			}
+			if (session.modes?.currentModeId !== this.permissionMode) {
 				await connection.setMode(session.sessionId, this.permissionMode, signal);
 			}
 			const currentModel = session.models?.currentModelId;
 			if (currentModel !== acpModelId) await connection.setModel(session.sessionId, acpModelId, signal);
+			this.assertActive();
 			const createdBinding: Binding = {
 				key,
 				cwd,
@@ -638,6 +639,8 @@ export class AntigravityRuntime {
 			this.persistBinding(createdBinding);
 			this.resolvedBindings.add(createdBinding);
 			void connection.process.exited.then(() => {
+				cancelPermission(createdBinding);
+				cancelPiTools(createdBinding, "Antigravity process exited before Pi returned the tool result");
 				this.resolvedBindings.delete(createdBinding);
 				void bridge?.close();
 				const current = this.bindings.get(key);
@@ -697,21 +700,16 @@ export class AntigravityRuntime {
 		binding: Binding | undefined,
 		request: RequestPermissionRequest,
 	): Promise<RequestPermissionResponse> {
-		if (!binding?.writer || binding.permission || request.sessionId !== binding.session.sessionId) {
+		if (!binding?.writer || binding.writer.finished || binding.permission ||
+			request.sessionId !== binding.session.sessionId || !binding.bridge?.permitsAcpTool(request.toolCall._meta)) {
 			return Promise.resolve({ outcome: { outcome: "cancelled" } });
 		}
-		const id = crypto.randomUUID();
-		return new Promise<RequestPermissionResponse>((resolve) => {
-			const timer = setTimeout(() => {
-				if (binding.permission?.id !== id) return;
-				binding.permission = undefined;
-				resolve({ outcome: { outcome: "cancelled" } });
-			}, PERMISSION_TIMEOUT_MS);
-			timer.unref();
-			binding.permission = { id, request, resolve, timer };
-			binding.writer?.toolCall(id, PERMISSION_TOOL_NAME, { requestId: id });
-			binding.writer?.done("toolUse");
-		});
+		// Permission here only admits a call into our authenticated MCP bridge.
+		// Pi retains authority to execute and approve the actual supplied tool.
+		const once = request.options.find((option) => option.kind === "allow_once");
+		return Promise.resolve(once
+			? { outcome: { outcome: "selected", optionId: once.optionId } }
+			: { outcome: { outcome: "cancelled" } });
 	}
 
 	private consumeUpdate(binding: Binding | undefined, notification: SessionNotification): void {
@@ -738,18 +736,19 @@ export class AntigravityRuntime {
 }
 
 async function authenticateForCredential(
-	connection: AntigravityAcpConnection,
+	_connection: AntigravityAcpConnection,
 	initialize: InitializeResponse,
 	apiKey: string | undefined,
-	signal?: AbortSignal,
+	_signal?: AbortSignal,
 ): Promise<void> {
-	if (!apiKey || apiKey === MANAGED_AUTH_MARKER) return;
-	const method = initialize.authMethods?.find((candidate) => {
-		const meta = candidate._meta as Record<string, unknown> | null | undefined;
-		return "api-key" in (meta ?? {}) || /api key/iu.test(candidate.name);
-	});
-	if (!method) throw new AntigravityAcpError("auth", "Antigravity ACP did not advertise API-key authentication");
-	await connection.authenticate({ methodId: method.id, _meta: { "api-key": apiKey } }, signal);
+	if (apiKey !== undefined && apiKey !== MANAGED_AUTH_MARKER) {
+		throw new AntigravityAcpError("auth", "This provider requires subscription OAuth; API keys are disabled");
+	}
+	if (!initialize.authMethods?.some((method) => method.id === "oauth-personal")) {
+		throw new AntigravityAcpError("auth", "Antigravity ACP did not advertise personal OAuth");
+	}
+	// The caller verifies saved personal OAuth before spawning. Streaming must
+	// never initiate an interactive login or switch to API-key authentication.
 }
 
 function adaptPromptToCapabilities(parts: PromptParts, initialize: InitializeResponse): PromptParts {
@@ -770,7 +769,7 @@ function adaptPromptToCapabilities(parts: PromptParts, initialize: InitializeRes
 }
 
 function hasUsableLocalAuth(health: AntigravityAuthHealth): boolean {
-	return health.status === "api-key-env" || health.status === "oauth-refreshable";
+	return health.status === "oauth-refreshable";
 }
 
 function supportsMode(session: NewSessionResponse, mode: PermissionMode): boolean {

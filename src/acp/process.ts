@@ -65,7 +65,7 @@ export class AntigravityProcess {
 
 		const child = spawn(command, args, {
 			cwd: path.resolve(options.cwd),
-			env: options.env ?? process.env,
+			env: subscriptionEnvironment(options.env ?? process.env),
 			stdio: ["pipe", "pipe", "pipe"],
 			shell: false,
 			windowsHide: true,
@@ -165,3 +165,12 @@ function delay(ms: number): Promise<void> {
 	});
 }
 
+
+/** Keep saved personal OAuth as the only billing route. */
+function subscriptionEnvironment(input: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
+ const env = { ...input };
+ for (const key of Object.keys(env)) {
+  if (/^(GEMINI_API_KEY|GOOGLE_API_KEY|GOOGLE_APPLICATION_CREDENTIALS|GOOGLE_CLOUD_.*|GCLOUD_.*|CLOUDSDK_.*|AGY_ACP_CCPA_.*|AGY_ACP_ENABLE_OAUTH|GOOGLE_GENAI_USE_VERTEXAI|NODE_OPTIONS|NODE_PATH|PYTHONPATH|PYTHONHOME|LD_PRELOAD|DYLD_.*)$/.test(key)) delete env[key];
+ }
+ return env;
+}

@@ -9,7 +9,6 @@ import type {
 	SimpleStreamOptions,
 } from "@earendil-works/pi-ai";
 
-import { hasAntigravityAuth } from "./acp/antigravity.js";
 import { FALLBACK_MODELS, projectModels, PROVIDER_ID } from "./models.js";
 import { AntigravityRuntime, MANAGED_AUTH_MARKER } from "./runtime.js";
 
@@ -65,51 +64,13 @@ export function createAntigravityProvider(runtime = new AntigravityRuntime()): A
 					return { apiKey: MANAGED_AUTH_MARKER };
 				},
 			},
-			apiKey: {
-				name: "Antigravity Gemini API key",
-				async login(interaction) {
-					const key = await interaction.prompt({
-						type: "secret",
-						message: "Gemini API key",
-						placeholder: "AIza…",
-					});
-					if (!key.trim()) throw new Error("Gemini API key is required");
-					interaction.notify({ type: "progress", message: "Verifying Gemini API key…" });
-					await runtime.verifyApiKey(key.trim(), interaction.signal, (message) =>
-						interaction.notify({ type: "progress", message }),
-					);
-					return { type: "api_key", key: key.trim() };
-				},
-				async check({ ctx, credential }) {
-					if (credential?.key) return { type: "api_key", source: "Pi auth store" };
-					if (await ctx.env("GEMINI_API_KEY")) return { type: "api_key", source: "GEMINI_API_KEY" };
-					if (hasAntigravityAuth()) {
-						return { type: "api_key", source: "Antigravity OAuth refresh token" };
-					}
-					return undefined;
-				},
-				async resolve({ ctx, credential }) {
-					const key = credential?.key ?? (await ctx.env("GEMINI_API_KEY"));
-					if (key) {
-						return {
-							auth: { apiKey: key },
-							source: credential?.key ? "Pi auth store" : "GEMINI_API_KEY",
-						};
-					}
-					if (hasAntigravityAuth()) {
-						return { auth: { apiKey: MANAGED_AUTH_MARKER }, source: "Antigravity OAuth refresh token" };
-					}
-					return undefined;
-				},
-			},
 		},
 		getModels: () => models,
 		async refreshModels(context: RefreshModelsContext) {
 			if (!context.allowNetwork) return;
+			if (context.credential?.type === "api_key") throw new Error("Only personal subscription OAuth is supported");
 			const key =
-				context.credential?.type === "api_key"
-					? context.credential.key
-					: context.credential?.type === "oauth"
+				context.credential?.type === "oauth"
 						? MANAGED_AUTH_MARKER
 						: undefined;
 			let discovered;

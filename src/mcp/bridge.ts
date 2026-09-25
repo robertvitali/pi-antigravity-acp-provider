@@ -55,6 +55,14 @@ export class PiMcpBridge {
 		this.fingerprint = JSON.stringify(this.tools.map((tool) => [tool.mcpName, tool.inputSchema]));
 	}
 
+	permitsAcpTool(meta: unknown): boolean {
+		if (!meta || typeof meta !== "object") return false;
+		const metadata = meta as Record<string, unknown>;
+		if (metadata.is_mcp_tool_call !== true || !metadata.mcp || typeof metadata.mcp !== "object") return false;
+		const mcp = metadata.mcp as Record<string, unknown>;
+		return mcp.server === "pi-bridge" && this.tools.some((tool) => tool.mcpName === mcp.tool);
+	}
+
 	get empty(): boolean {
 		return this.tools.length === 0;
 	}

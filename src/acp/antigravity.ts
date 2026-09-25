@@ -57,7 +57,7 @@ export interface AntigravityAuthHealth {
 /** Structural local health only. A network probe is required to call an OAuth
  * token valid; secret values are never returned or logged. */
 export function inspectAntigravityAuth(
-	directory = path.join(os.homedir(), ".gemini", "antigravity-acp"),
+	directory = path.join(expandHome(process.env.GEMINI_HOME || path.join(os.homedir(), ".gemini")), "antigravity-acp"),
 ): AntigravityAuthHealth {
 	const tokenPath = path.join(directory, "acp_token.json");
 	const settingsPath = path.join(directory, "settings.json");
@@ -74,12 +74,12 @@ export function inspectAntigravityAuth(
 			return { status: "corrupt", tokenFile, settingsFile };
 		}
 	}
-	if (process.env.GEMINI_API_KEY) return { status: "api-key-env", authType: "gemini-api-key", tokenFile, settingsFile };
+	if (authType && authType !== "oauth-personal") return { status: "configured-not-authenticated", authType, tokenFile, settingsFile };
 	if (tokenFile) {
 		try {
 			const token = JSON.parse(fs.readFileSync(tokenPath, "utf8")) as { refresh_token?: unknown };
 			if (typeof token.refresh_token === "string" && token.refresh_token.length > 0) {
-				return { status: "oauth-refreshable", authType: authType ?? "oauth-personal", tokenFile, settingsFile };
+				return { status: authType === "oauth-personal" ? "oauth-refreshable" : "configured-not-authenticated", ...(authType ? { authType } : {}), tokenFile, settingsFile };
 			}
 			return { status: "corrupt", ...(authType ? { authType } : {}), tokenFile, settingsFile };
 		} catch {
@@ -92,13 +92,13 @@ export function inspectAntigravityAuth(
 
 export function hasAntigravityAuth(): boolean {
 	const status = inspectAntigravityAuth().status;
-	return status === "api-key-env" || status === "oauth-refreshable";
+	return status === "oauth-refreshable";
 }
 
 /** Local logout. Google currently advertises logout as an agent command rather
  * than an ACP SDK RPC, so this removes the local refresh token and auth choice. */
 export function clearAntigravityCredentials(
-	directory = path.join(os.homedir(), ".gemini", "antigravity-acp"),
+	directory = path.join(expandHome(process.env.GEMINI_HOME || path.join(os.homedir(), ".gemini")), "antigravity-acp"),
 ): void {
 	fs.rmSync(path.join(directory, "acp_token.json"), { force: true });
 	const settingsPath = path.join(directory, "settings.json");

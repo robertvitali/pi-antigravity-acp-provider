@@ -32,11 +32,11 @@ describe("projectModels", () => {
 		expect(resolveAcpModelId(models[1]!, "medium")).toBe("gemini-pro-agent");
 	});
 
-	it("registers separate Google-account and API-key login methods", async () => {
+	it("registers only Google-account login", async () => {
 		const { provider, runtime } = createAntigravityProvider();
 		try {
 			expect(provider.auth.oauth?.loginLabel).toBe("Sign in with Google");
-			expect(provider.auth.apiKey?.name).toBe("Antigravity Gemini API key");
+			expect(provider.auth.apiKey).toBeUndefined();
 		} finally {
 			await runtime.close();
 		}

@@ -28,13 +28,13 @@ export function loadConfig(file = CONFIG_PATH): AntigravityAcpConfig {
 			runtimeUpdates?: unknown;
 		};
 		return {
-			permissions: isPermissionMode(parsed.permissions) ? parsed.permissions : "yolo",
-			runtimeUpdates: isRuntimeUpdateMode(parsed.runtimeUpdates) ? parsed.runtimeUpdates : "automatic",
+			permissions: isPermissionMode(parsed.permissions) ? parsed.permissions : "default",
+			runtimeUpdates: isRuntimeUpdateMode(parsed.runtimeUpdates) ? parsed.runtimeUpdates : "manual",
 		};
 	} catch {
 		// Missing or malformed configuration uses the documented defaults.
 	}
-	return { permissions: "yolo", runtimeUpdates: "automatic" };
+	return { permissions: "default", runtimeUpdates: "manual" };
 }
 
 export function savePermissionMode(mode: PermissionMode, file = CONFIG_PATH): void {

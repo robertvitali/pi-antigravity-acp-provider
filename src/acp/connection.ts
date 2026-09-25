@@ -141,7 +141,7 @@ export class AntigravityAcpConnection {
 		await this.initialize();
 		return this.withAbort(
 			this.withDeadline(
-				this.connection.newSession({ cwd, mcpServers }),
+				this.connection.newSession({ cwd, mcpServers, _meta: { agy: { enabledTools: [] } } }),
 				this.operationTimeoutMs,
 				"session/new",
 			),
@@ -158,7 +158,7 @@ export class AntigravityAcpConnection {
 		await this.initialize();
 		return this.withAbort(
 			this.withDeadline(
-				this.connection.loadSession({ sessionId, cwd, mcpServers }),
+				this.connection.loadSession({ sessionId, cwd, mcpServers, _meta: { agy: { enabledTools: [] } } }),
 				this.operationTimeoutMs,
 				"session/load",
 			),
@@ -175,7 +175,7 @@ export class AntigravityAcpConnection {
 		await this.initialize();
 		return this.withAbort(
 			this.withDeadline(
-				this.connection.unstable_resumeSession({ sessionId, cwd, mcpServers }),
+				this.connection.unstable_resumeSession({ sessionId, cwd, mcpServers, _meta: { agy: { enabledTools: [] } } }),
 				this.operationTimeoutMs,
 				"session/resume",
 			),

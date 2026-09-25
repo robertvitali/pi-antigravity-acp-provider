@@ -7,6 +7,15 @@ import { AntigravityAcpConnection } from "../src/acp/connection.js";
 const fakeAgent = fileURLToPath(new URL("./fixtures/fake-agent.mjs", import.meta.url));
 
 describe("AntigravityAcpConnection", () => {
+	it("disables native tools for new, loaded and resumed sessions", async () => {
+		const connection = new AntigravityAcpConnection({ cwd: path.dirname(fakeAgent), command: process.execPath, args: [fakeAgent, "boundary-wire"] });
+		try {
+			await connection.initialize();
+			await expect(connection.newSession(process.cwd())).resolves.toHaveProperty("sessionId");
+			await expect(connection.loadSession("fake-session", process.cwd())).resolves.toHaveProperty("modes");
+			await expect(connection.resumeSession("fake-session", process.cwd())).resolves.toHaveProperty("modes");
+		} finally { await connection.close(); }
+	});
 	it("ignores known browser-launch stdout noise", async () => {
 		const connection = new AntigravityAcpConnection({
 			cwd: path.dirname(fakeAgent),

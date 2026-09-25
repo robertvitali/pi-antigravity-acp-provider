@@ -29,8 +29,15 @@ for await (const line of rl) {
 		continue;
 	}
 	const { id, method, params } = message;
+	if (scenario === "boundary-wire" && ["initialize", "session/new", "session/load", "session/resume"].includes(method)) {
+		const valid = method === "initialize"
+			? params.clientCapabilities?.fs?.readTextFile === false && params.clientCapabilities?.fs?.writeTextFile === false && params.clientCapabilities?.terminal === false
+			: Array.isArray(params._meta?.agy?.enabledTools) && params._meta.agy.enabledTools.length === 0;
+		if (!valid) { send({ jsonrpc: "2.0", id, error: { code: -32602, message: "Missing tool boundary" } }); continue; }
+	}
 	if (id === "permission-1" && method === undefined && permissionPromptId !== undefined) {
-		const decision = message.result?.outcome?.outcome ?? "cancelled";
+		let decision = message.result?.outcome?.outcome ?? "cancelled";
+		if (scenario?.startsWith("bridge-permission") && decision === "selected") decision += `:${message.result.outcome.optionId}`;
 		send({
 			jsonrpc: "2.0",
 			method: "session/update",
@@ -57,7 +64,8 @@ for await (const line of rl) {
 				protocolVersion: 1,
 				agentInfo: { name: "fake-gemini", version: "1.0.0" },
 				authMethods: [
-					{ id: "oauth-personal", name: "Log in with Google" },
+					...(scenario === "business-first" ? [{ id: "oauth-business", name: "Log in with Google" }] : []),
+					{ id: scenario === "no-personal-oauth" ? "other" : "oauth-personal", name: "Log in with Google" },
 					{ id: "api", name: "Gemini API key", _meta: { "api-key": { provider: "google" } } },
 				],
 				agentCapabilities: {
@@ -72,6 +80,10 @@ for await (const line of rl) {
 			setTimeout(() => process.exit(0), 10);
 		}
 	} else if (method === "authenticate") {
+		if (scenario === "business-first" && params.methodId !== "oauth-personal") {
+			send({ jsonrpc: "2.0", id, error: { code: -32602, message: "Non-personal OAuth selected" } });
+			continue;
+		}
 		if (scenario === "headless-auth") {
 			const state = "fake-oauth-state";
 			const server = http.createServer((request, response) => {
@@ -124,7 +136,7 @@ for await (const line of rl) {
 				sessionId: "fake-session",
 				modes: {
 					currentModeId: mode,
-					availableModes: [
+					availableModes: scenario === "missing-mode" ? [] : scenario === "default-mode-only" ? [{ id: "default", name: "Default" }] : [
 						{ id: "default", name: "Default" },
 						{ id: "auto_edit", name: "Auto Edit" },
 						{ id: "yolo", name: "YOLO" },
@@ -146,7 +158,7 @@ for await (const line of rl) {
 			result: {
 				modes: {
 					currentModeId: mode,
-					availableModes: [
+					availableModes: scenario === "missing-mode" ? [] : scenario === "default-mode-only" ? [{ id: "default", name: "Default" }] : [
 						{ id: "default", name: "Default" },
 						{ id: "auto_edit", name: "Auto Edit" },
 						{ id: "yolo", name: "YOLO" },
@@ -165,6 +177,9 @@ for await (const line of rl) {
 		const text = params.prompt.filter((block) => block.type === "text").map((block) => block.text).join("\n");
 		if (text.includes("bridge") && mcpServer) {
 			bridgePromptId = id;
+			if (scenario === "orphan-tool") {
+				setTimeout(() => send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } }), 130);
+			}
 			const invocation = text.includes("parallel")
 				? Promise.all([
 						invokeMcpTool(mcpServer, "first"),
@@ -199,13 +214,19 @@ for await (const line of rl) {
 				method: "session/request_permission",
 				params: {
 					sessionId: params.sessionId,
-					toolCall: { toolCallId: "native-tool-1", title: "Run native command", kind: "execute" },
+					toolCall: { toolCallId: "native-tool-1", title: "Run native command", kind: "execute",
+						...((scenario?.startsWith("bridge-permission") || scenario === "orphan-permission") ? { _meta: { is_mcp_tool_call: true, mcp: { server: "pi-bridge", tool: scenario === "bridge-permission-unknown" ? "pi_unregistered" : "pi_echo" } } } : {}),
+					},
 					options: [
-						{ optionId: "allow-once", name: "Allow once", kind: "allow_once" },
+						{ optionId: "allow-always", name: "Always", kind: "allow_always" },
+						...(scenario === "bridge-permission-always" ? [] : [{ optionId: "allow-once", name: "Allow once", kind: "allow_once" }]),
 						{ optionId: "reject-once", name: "Reject", kind: "reject_once" },
 					],
 				},
 			});
+			if (scenario === "orphan-permission") {
+				setTimeout(() => send({ jsonrpc: "2.0", id, result: { stopReason: "end_turn" } }), 10);
+			}
 			continue;
 		}
 		send({

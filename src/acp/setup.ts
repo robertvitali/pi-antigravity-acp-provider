@@ -92,6 +92,34 @@ export interface RuntimeUpdateStatus {
 	launch?: AntigravityLaunch;
 }
 
+/** Explicit deployment entry point. No network or model calls at Pi startup.
+ * Hash and sizes were verified against Google's signed 1.2.1 macOS artifacts.
+ * Updates require a reviewed source change plus live boundary qualification. */
+export function qualifiedRuntime(key = platformKey()): ResolvedRuntimeRelease {
+	if (key !== "darwin-aarch64") throw new Error(`Antigravity ACP platform not qualified: ${key}`);
+	return {
+		version: "1.2.1", platform: key,
+		archive: "https://dl.google.com/agy-extensions/releases/macos/agy-acp-server-1.2.1-darwin-arm64.zip",
+		archiveSha256: "0fab9938812e6b32b3b543e65e4f3a0025ceef755413db13542d9a9b81ea803c",
+		archiveBytes: 111725488,
+		binaryName: "agy_acp_server.par", binaryBytes: 276920768,
+		harnessName: "localharness_external", harnessBytes: 120663872,
+		args: [],
+	};
+}
+
+/** Resolve the reviewed immutable install; never use an ambient override. */
+export function resolveQualifiedRuntime(): AntigravityLaunch {
+	const release = qualifiedRuntime();
+	const directory = path.join(runtimeRoot(), "versions", release.archiveSha256);
+	if (!isInstalledRelease(directory, release)) throw new Error("Antigravity qualified runtime is not installed; run explicit setup");
+	return { command: path.join(directory, release.binaryName), args: release.args, source: "managed" };
+}
+
+export function installQualifiedRuntime(onProgress?: (message: string) => void) {
+	return installRuntime(qualifiedRuntime(), onProgress, true);
+}
+
 export function inspectRuntimeSetup(): RuntimeSetupStatus {
 	let launch: AntigravityLaunch | undefined;
 	try {
@@ -145,7 +173,6 @@ export async function checkAntigravityAcpUpdate(force = false): Promise<RuntimeU
 export async function updateAntigravityAcpRuntime(
 	onProgress?: (message: string) => void,
 ): Promise<{ version: string; changed: boolean; binary: string }> {
-	configureDefaultAuth();
 	const selected = inspectRuntimeSetup().launch;
 	if (selected && selected.source !== "managed") {
 		throw new AntigravityAcpError(
@@ -165,7 +192,6 @@ export async function updateAntigravityAcpRuntime(
 }
 
 async function ensureOnce(onProgress?: (message: string) => void): Promise<void> {
-	configureDefaultAuth();
 	let launch: AntigravityLaunch | undefined;
 	try {
 		launch = resolveAntigravityAcpLaunch();
@@ -269,6 +295,7 @@ async function fetchOfficialRelease(key: string, force: boolean): Promise<Offici
 async function installRuntime(
 	release: ResolvedRuntimeRelease,
 	onProgress?: (message: string) => void,
+	requireExactRelease = false,
 ): Promise<{ version: string; changed: boolean; binary: string }> {
 	try {
 		if (isMuslLinux()) {
@@ -288,6 +315,7 @@ async function installRuntime(
 				return { version: current.record.version, changed: false, binary: current.binary };
 			}
 			if (current && compareRuntimeVersions(current.record.version, release.version) > 0) {
+				if (requireExactRelease) throw new Error("Refusing unqualified newer runtime; explicitly select the qualified release");
 				return { version: current.record.version, changed: false, binary: current.binary };
 			}
 
@@ -716,23 +744,6 @@ function pointCurrentAt(root: string, destination: string): void {
 	);
 	fs.rmSync(current, { recursive: true, force: true });
 	fs.renameSync(temporary, current);
-}
-
-function configureDefaultAuth(): void {
-	const directory = path.join(os.homedir(), ".gemini", "antigravity-acp");
-	const settingsFile = path.join(directory, "settings.json");
-	const tokenFile = path.join(directory, "acp_token.json");
-	if (fs.existsSync(tokenFile)) return;
-	let settings: Record<string, unknown> = {};
-	try {
-		settings = JSON.parse(fs.readFileSync(settingsFile, "utf8")) as Record<string, unknown>;
-		if (settings.auth && typeof settings.auth === "object") return;
-	} catch {
-		// Create or repair settings below.
-	}
-	fs.mkdirSync(directory, { recursive: true, mode: 0o700 });
-	const type = process.env.GEMINI_API_KEY ? "gemini-api-key" : "oauth-personal";
-	fs.writeFileSync(settingsFile, `${JSON.stringify({ ...settings, auth: { type } }, null, 2)}\n`, { mode: 0o600 });
 }
 
 export function platformKey(): string {

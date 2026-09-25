@@ -1,3 +1,17 @@
+# Owned subscription-only fork
+
+This repository is robertvitali's narrow fork of [zacbemis/pi-antigravity-acp-provider](https://github.com/zacbemis/pi-antigravity-acp-provider), retaining its MIT license and upstream attribution.
+
+The production consumer is `robertvitali/pi`. It loads the adapter only for delegated Gemini sessions, executes tools through Pi, and keeps native ACP tools disabled. Personal OAuth is the only accepted authentication route. The adapter does not opt requests into AI credits; quota failures must propagate without paid fallback.
+
+Runtime setup is explicit: call `installQualifiedRuntime()` from `src/acp/setup.ts` during deployment. It reuses the upstream installer with the reviewed Google 1.2.1 macOS Apple Silicon archive, SHA-256, file sizes, extraction checks and ACP identity validation. Other platforms are not yet qualified. Do not call the upstream rolling installer for fleet deployment. Updating this runtime requires a reviewed hash change and repeating live tool-boundary and cleanup tests.
+
+The consumer requires an authenticated personal profile (`GEMINI_HOME/antigravity-acp`, default `~/.gemini/antigravity-acp`) before dispatch. Startup never launches interactive login. No role mapping or Gemini main-agent support is implied by installing this package.
+
+The documentation below is retained upstream reference; API-key login and automatic runtime updates described there are not the supported behavior of this fork.
+
+---
+
 # pi-antigravity-acp-provider
 
 A first-class [Pi](https://github.com/earendil-works/pi) provider for **Google Antigravity** through its official ACP server.

@@ -4,14 +4,13 @@ import os from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { Type } from "typebox";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 
 import { AntigravityAcpConnection } from "../src/acp/connection.js";
 import { AcpSessionStore } from "../src/acp/session-store.js";
 import {
 	AntigravityRuntime,
-	PERMISSION_RESULT_KIND,
-	PERMISSION_TOOL_NAME,
+	MANAGED_AUTH_MARKER,
 } from "../src/runtime.js";
 
 const fakeAgent = fileURLToPath(new URL("./fixtures/fake-agent.mjs", import.meta.url));
@@ -29,6 +28,135 @@ const model: Model<"antigravity-acp"> = {
 };
 
 describe("AntigravityRuntime", () => {
+	it("selects personal OAuth by exact ID when business login is advertised first", async () => {
+		const runtime = new AntigravityRuntime((options) => new AntigravityAcpConnection({
+			...options, command: process.execPath, args: [fakeAgent, "business-first"],
+		}));
+		try { await expect(runtime.loginGoogle()).resolves.toBeUndefined(); }
+		finally { await runtime.close(); }
+	});
+	it("does not prompt when closed during session creation", async () => {
+		let release!: () => void;
+		const gate = new Promise<void>((resolve) => { release = resolve; });
+		let ready!: () => void;
+		const created = new Promise<void>((resolve) => { ready = resolve; });
+		let connection!: AntigravityAcpConnection;
+		let bridgeUrl: string | undefined;
+		const runtime = new AntigravityRuntime((options) => {
+			connection = new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent] });
+			const newSession = connection.newSession.bind(connection);
+			vi.spyOn(connection, "newSession").mockImplementation(async (...args) => {
+				const session = await newSession(...args);
+				const server = args[2]?.[0];
+				if (server && "url" in server) bridgeUrl = server.url;
+				ready();
+				await gate;
+				return session;
+			});
+			vi.spyOn(connection, "prompt");
+			return connection;
+		});
+		const writer = runtime.stream(model, {
+			tools: [{ name: "echo", description: "Echo", parameters: Type.Object({ text: Type.String() }) }],
+			messages: [{ role: "user", content: "hello", timestamp: 1 }],
+		}, { sessionId: "closing" });
+		await created;
+		const closing = runtime.close();
+		release();
+		await closing;
+		for await (const event of writer.stream) { void event; }
+		expect(connection.prompt).not.toHaveBeenCalled();
+		expect(connection.process.alive).toBe(false);
+		expect((await runtime.snapshot()).bindings).toBe(0);
+		expect(bridgeUrl).toBeDefined();
+		await expect(fetch(bridgeUrl!)).rejects.toThrow();
+	});
+	it.each(["orphan-tool"])("clears orphaned timers on process exit: %s", async (scenario) => {
+		const timers: ReturnType<typeof setTimeout>[] = [];
+		const originalSetTimeout = globalThis.setTimeout;
+		const setTimer = vi.spyOn(globalThis, "setTimeout").mockImplementation(((...args: Parameters<typeof setTimeout>) => {
+			const timer = originalSetTimeout(...args);
+			if (args[1] === 120_000) timers.push(timer);
+			return timer;
+		}) as typeof setTimeout);
+		const clearTimer = vi.spyOn(globalThis, "clearTimeout");
+		let connection!: AntigravityAcpConnection;
+		const runtime = new AntigravityRuntime((options) => (connection = new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent, scenario] })));
+		try {
+			const writer = runtime.stream(model, {
+				tools: [{ name: "echo", description: "Echo", parameters: Type.Object({ text: Type.String() }) }],
+				messages: [{ role: "user", content: scenario === "orphan-tool" ? "use bridge" : "permission", timestamp: 1 }],
+			}, { sessionId: "orphan" });
+			for await (const event of writer.stream) { void event; }
+			await new Promise((resolve) => originalSetTimeout(resolve, 50));
+			expect(timers.some((timer) => !clearTimer.mock.calls.some(([cleared]) => cleared === timer))).toBe(true);
+			await connection.close();
+			await new Promise((resolve) => originalSetTimeout(resolve, 10));
+			expect(timers.every((timer) => clearTimer.mock.calls.some(([cleared]) => cleared === timer))).toBe(true);
+		} finally { await runtime.close(); setTimer.mockRestore(); clearTimer.mockRestore(); }
+	});
+	it("rejects API keys even when reusing an existing session", async () => {
+		const runtime = new AntigravityRuntime((options) => new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent] }));
+		try {
+			const context: Context = { messages: [{ role: "user", content: "hello", timestamp: 1 }] };
+			const first = runtime.stream(model, context, { sessionId: "auth-reuse" });
+			for await (const event of first.stream) { void event; }
+			const next = runtime.stream(model, context, { sessionId: "auth-reuse", apiKey: "paid-key" });
+			for await (const event of next.stream) { void event; }
+			expect(next.message.errorMessage).toContain("subscription OAuth");
+		} finally { await runtime.close(); }
+	});
+	it("requires the personal OAuth method without initiating login", async () => {
+		const runtime = new AntigravityRuntime((options) => new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent, "no-personal-oauth"] }));
+		try { await expect(runtime.discoverModels(MANAGED_AUTH_MARKER)).rejects.toThrow("personal OAuth"); }
+		finally { await runtime.close(); }
+	});
+	it("rejects API-key verification before starting a process", async () => {
+		let spawned = false;
+		const runtime = new AntigravityRuntime(() => { spawned = true; throw new Error("must not spawn"); });
+		await expect(runtime.verifyApiKey("paid-key")).rejects.toThrow("subscription OAuth");
+		expect(spawned).toBe(false);
+	});
+	it("rejects API-key streaming and discovery", async () => {
+		const runtime = new AntigravityRuntime((options) => new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent] }));
+		try {
+			await expect(runtime.discoverModels("paid-key")).rejects.toThrow("subscription OAuth");
+			const writer = runtime.stream(model, { messages: [{ role: "user", content: "hello", timestamp: 1 }] }, { apiKey: "paid-key" });
+			for await (const event of writer.stream) { void event; }
+			expect(writer.message.errorMessage).toContain("subscription OAuth");
+		} finally { await runtime.close(); }
+	});
+	it("rejects mode changes that an active session did not advertise", async () => {
+		const runtime = new AntigravityRuntime((options) => new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent, "default-mode-only"] }));
+		try {
+			const writer = runtime.stream(model, { messages: [{ role: "user", content: "hello", timestamp: 1 }] }, { sessionId: "mode-test" });
+			for await (const event of writer.stream) { void event; }
+			await expect(runtime.setPermissionMode("yolo")).rejects.toThrow("mode yolo");
+			expect((await runtime.snapshot()).permissionMode).toBe("default");
+		} finally { await runtime.close(); }
+	});
+	it("rejects native permissions without offering a Pi approval", async () => {
+		const runtime = new AntigravityRuntime((options) => new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent] }));
+		try {
+			const writer = runtime.stream(model, { messages: [{ role: "user", content: "permission", timestamp: 1 }] });
+			const events = [];
+			for await (const event of writer.stream) events.push(event);
+			expect(events.some((event) => event.type === "toolcall_start")).toBe(false);
+			expect(writer.message.content).toEqual([{ type: "text", text: "Decision: cancelled" }]);
+		} finally { await runtime.close(); }
+	});
+	it("fails closed and cleans up when the requested mode is unavailable", async () => {
+		let connection: AntigravityAcpConnection | undefined;
+		const runtime = new AntigravityRuntime((options) => (connection = new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent, "missing-mode"] })));
+		try {
+			const writer = runtime.stream(model, { messages: [{ role: "user", content: "hello", timestamp: 1 }] });
+			const events = [];
+			for await (const event of writer.stream) events.push(event);
+			expect(events.at(-1)?.type).toBe("error");
+			expect(writer.message.errorMessage).toContain("mode default");
+			expect(connection?.process.alive).toBe(false);
+		} finally { await runtime.close(); }
+	});
 	it("recognizes Gemini CLI's advertised Google login method", async () => {
 		const runtime = new AntigravityRuntime(
 			(options) => new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent] }),
@@ -107,7 +235,7 @@ describe("AntigravityRuntime", () => {
 				systemPrompt: "Be useful",
 				messages: [{ role: "user", content: "hello", timestamp: Date.now() }],
 			};
-			const writer = runtime.stream(model, context, { sessionId: "pi-session", apiKey: "test-key" });
+			const writer = runtime.stream(model, context, { sessionId: "pi-session", apiKey: MANAGED_AUTH_MARKER });
 			const events = [];
 			for await (const event of writer.stream) events.push(event);
 			expect(events.map((event) => event.type)).toEqual([
@@ -127,7 +255,7 @@ describe("AntigravityRuntime", () => {
 			});
 			const snapshot = await runtime.snapshot();
 			expect(snapshot.bindings).toBe(1);
-			expect(snapshot.permissionMode).toBe("yolo");
+			expect(snapshot.permissionMode).toBe("default");
 			expect(snapshot.processes[0]).toMatchObject({ modelId: "gemini-test", alive: true });
 			await runtime.setPermissionMode("default");
 			expect((await runtime.snapshot()).permissionMode).toBe("default");
@@ -142,7 +270,7 @@ describe("AntigravityRuntime", () => {
 						{ role: "user", content: "second turn", timestamp: Date.now() },
 					],
 				},
-				{ sessionId: "pi-session", apiKey: "test-key" },
+				{ sessionId: "pi-session", apiKey: MANAGED_AUTH_MARKER },
 			);
 			for await (const _event of second.stream) void _event;
 			const switched = await runtime.snapshot();
@@ -165,7 +293,7 @@ describe("AntigravityRuntime", () => {
 			const firstContext: Context = {
 				messages: [{ role: "user", content: "first", timestamp: 1 }],
 			};
-			const first = firstRuntime.stream(model, firstContext, { sessionId: "persisted", apiKey: "test-key" });
+			const first = firstRuntime.stream(model, firstContext, { sessionId: "persisted", apiKey: MANAGED_AUTH_MARKER });
 			const firstEvents = [];
 			for await (const event of first.stream) firstEvents.push(event);
 			const done = firstEvents.at(-1);
@@ -183,7 +311,7 @@ describe("AntigravityRuntime", () => {
 							{ role: "user", content: "second", timestamp: 2 },
 						],
 					},
-					{ sessionId: "persisted", apiKey: "test-key" },
+					{ sessionId: "persisted", apiKey: MANAGED_AUTH_MARKER },
 				);
 				for await (const _event of second.stream) void _event;
 				expect((await secondRuntime.snapshot()).processes[0]?.restored).toBe(true);
@@ -204,7 +332,7 @@ describe("AntigravityRuntime", () => {
 			const first = runtime.stream(
 				model,
 				{ messages: [{ role: "user", content: "original", timestamp: 1 }] },
-				{ sessionId: "rewind-session", apiKey: "test-key" },
+				{ sessionId: "rewind-session", apiKey: MANAGED_AUTH_MARKER },
 			);
 			for await (const _event of first.stream) void _event;
 			const firstGeneration = (await runtime.snapshot()).processes[0]?.generation;
@@ -217,7 +345,7 @@ describe("AntigravityRuntime", () => {
 						{ role: "user", content: "continue", timestamp: 2 },
 					],
 				},
-				{ sessionId: "rewind-session", apiKey: "test-key" },
+				{ sessionId: "rewind-session", apiKey: MANAGED_AUTH_MARKER },
 			);
 			for await (const _event of second.stream) void _event;
 			const secondGeneration = (await runtime.snapshot()).processes[0]?.generation;
@@ -227,72 +355,24 @@ describe("AntigravityRuntime", () => {
 		}
 	});
 
-	it("parks a permission request and resumes it from a Pi tool result", async () => {
+	it.each([
+		["bridge-permission", "Decision: selected:allow-once"],
+		["bridge-permission-always", "Decision: cancelled"],
+		["bridge-permission-unknown", "Decision: cancelled"],
+	])("handles exact bridge permission without an extra Pi tool: %s", async (scenario, expected) => {
 		const runtime = new AntigravityRuntime(
-			(options) => new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent] }),
+			(options) => new AntigravityAcpConnection({ ...options, command: process.execPath, args: [fakeAgent, scenario] }),
 		);
 		try {
-			const firstContext: Context = {
-				messages: [{ role: "user", content: "request permission", timestamp: 1 }],
-			};
-			const firstWriter = runtime.stream(model, firstContext, {
-				sessionId: "permission-session",
-				apiKey: "test-key",
-			});
-			const firstEvents = [];
-			for await (const event of firstWriter.stream) firstEvents.push(event);
-			expect(firstEvents.map((event) => event.type)).toEqual([
-				"start",
-				"toolcall_start",
-				"toolcall_delta",
-				"toolcall_end",
-				"done",
-			]);
-			const firstMessage = firstEvents.at(-1);
-			if (firstMessage?.type !== "done") throw new Error("missing permission turn");
-			const toolCall = firstMessage.message.content.find((block) => block.type === "toolCall");
-			if (!toolCall || toolCall.type !== "toolCall") throw new Error("missing permission tool call");
-			const request = runtime.getPermission(toolCall.id);
-			expect(request?.options.map((option) => option.kind)).toEqual(["allow_once", "reject_once"]);
-
-			const resumedContext: Context = {
-				messages: [
-					...firstContext.messages,
-					firstMessage.message,
-					{
-						role: "toolResult",
-						toolCallId: toolCall.id,
-						toolName: PERMISSION_TOOL_NAME,
-						content: [{ type: "text", text: "Rejected" }],
-						details: {
-							kind: PERMISSION_RESULT_KIND,
-							requestId: toolCall.id,
-							optionId: "reject-once",
-							cancelled: false,
-						},
-						isError: false,
-						timestamp: 2,
-					},
-				],
-			};
-			const secondWriter = runtime.stream(model, resumedContext, {
-				sessionId: "permission-session",
-				apiKey: "test-key",
-			});
-			const secondEvents = [];
-			for await (const event of secondWriter.stream) secondEvents.push(event);
-			expect(secondEvents.map((event) => event.type)).toEqual([
-				"start",
-				"text_start",
-				"text_delta",
-				"text_end",
-				"done",
-			]);
-			expect(secondWriter.message.content).toEqual([{ type: "text", text: "Decision: selected" }]);
-			expect(runtime.getPermission(toolCall.id)).toBeUndefined();
-		} finally {
-			await runtime.close();
-		}
+			const writer = runtime.stream(model, {
+				tools: [{ name: "echo", description: "Echo", parameters: Type.Object({ text: Type.String() }) }],
+				messages: [{ role: "user", content: "permission", timestamp: 1 }],
+			}, { sessionId: "permission-session", apiKey: MANAGED_AUTH_MARKER });
+			const events = [];
+			for await (const event of writer.stream) events.push(event);
+			expect(events.some((event) => event.type === "toolcall_start")).toBe(false);
+			expect(writer.message.content).toEqual([{ type: "text", text: expected }]);
+		} finally { await runtime.close(); }
 	});
 
 	it("round-trips an MCP call through a genuine Pi tool call", async () => {
@@ -307,7 +387,7 @@ describe("AntigravityRuntime", () => {
 				messages: [{ role: "user", content: "use bridge", timestamp: 1 }],
 				tools,
 			};
-			const firstWriter = runtime.stream(model, firstContext, { apiKey: "test-key" });
+			const firstWriter = runtime.stream(model, firstContext, { apiKey: MANAGED_AUTH_MARKER });
 			const firstEvents = [];
 			for await (const event of firstWriter.stream) firstEvents.push(event);
 			const firstDone = firstEvents.at(-1);
@@ -334,7 +414,7 @@ describe("AntigravityRuntime", () => {
 						},
 					],
 				},
-				{ apiKey: "test-key" },
+				{ apiKey: MANAGED_AUTH_MARKER },
 			);
 			const secondEvents = [];
 			for await (const event of secondWriter.stream) secondEvents.push(event);
@@ -359,7 +439,7 @@ describe("AntigravityRuntime", () => {
 			};
 			const first = runtime.stream(model, firstContext, {
 				sessionId: "parallel-session",
-				apiKey: "test-key",
+				apiKey: MANAGED_AUTH_MARKER,
 			});
 			const firstEvents = [];
 			for await (const event of first.stream) firstEvents.push(event);
@@ -382,7 +462,7 @@ describe("AntigravityRuntime", () => {
 					tools,
 					messages: [...firstContext.messages, firstDone.message, ...toolResults],
 				},
-				{ sessionId: "parallel-session", apiKey: "test-key" },
+				{ sessionId: "parallel-session", apiKey: MANAGED_AUTH_MARKER },
 			);
 			for await (const _event of second.stream) void _event;
 			expect(second.message.content).toEqual([{ type: "text", text: "result-1,result-2" }]);
@@ -405,7 +485,7 @@ describe("AntigravityRuntime", () => {
 			};
 			const first = runtime.stream(model, firstContext, {
 				sessionId: "continuation-abort",
-				apiKey: "test-key",
+				apiKey: MANAGED_AUTH_MARKER,
 			});
 			const firstEvents = [];
 			for await (const event of first.stream) firstEvents.push(event);
@@ -432,7 +512,7 @@ describe("AntigravityRuntime", () => {
 						},
 					],
 				},
-				{ sessionId: "continuation-abort", apiKey: "test-key", signal: controller.signal },
+				{ sessionId: "continuation-abort", apiKey: MANAGED_AUTH_MARKER, signal: controller.signal },
 			);
 			setTimeout(() => controller.abort(), 30);
 			const secondEvents = [];
@@ -453,7 +533,7 @@ describe("AntigravityRuntime", () => {
 			const writer = runtime.stream(
 				model,
 				{ messages: [{ role: "user", content: "hang", timestamp: 1 }] },
-				{ sessionId: "abort-session", apiKey: "test-key", signal: controller.signal },
+				{ sessionId: "abort-session", apiKey: MANAGED_AUTH_MARKER, signal: controller.signal },
 			);
 			await runtime.snapshot();
 			controller.abort();

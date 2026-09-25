@@ -23,6 +23,9 @@ afterEach(() => {
 
 describe("external runtime ownership", () => {
 	it("refuses explicit updates before any network request", async () => {
+		const authHome = temporaryDirectory();
+		vi.stubEnv("HOME", authHome);
+		vi.stubEnv("GEMINI_API_KEY", "fixture-not-real");
 		const binary = path.join(temporaryDirectory(), "external-agent");
 		fs.writeFileSync(binary, "external", { mode: 0o755 });
 		vi.stubEnv("AGY_ACP_BIN", binary);
@@ -30,6 +33,7 @@ describe("external runtime ownership", () => {
 		vi.stubGlobal("fetch", fetchMock);
 		await expect(updateAntigravityAcpRuntime()).rejects.toThrow("externally managed");
 		expect(fetchMock).not.toHaveBeenCalled();
+		expect(fs.existsSync(path.join(authHome, ".gemini/antigravity-acp/settings.json"))).toBe(false);
 		expect(fs.readFileSync(binary, "utf8")).toBe("external");
 	});
 });

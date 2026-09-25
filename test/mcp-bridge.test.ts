@@ -15,6 +15,13 @@ const tools: Tool[] = [
 ];
 
 describe("PiMcpBridge", () => {
+	it("recognizes only exact projected tools on its own server", () => {
+		const bridge = new PiMcpBridge({ tools: [...tools, { name: "omitted", description: "Bad schema", parameters: Type.String() }], onCall: async () => ({ content: [] }) });
+		expect(bridge.permitsAcpTool({ is_mcp_tool_call: true, mcp: { server: "pi-bridge", tool: "pi_echo" } })).toBe(true);
+		for (const meta of [undefined, {}, { is_mcp_tool_call: false, mcp: { server: "pi-bridge", tool: "pi_echo" } }, ...["pi_omitted", "echo", "pi_echo_extra"].map((tool) => ({ is_mcp_tool_call: true, mcp: { server: "pi-bridge", tool } })), { is_mcp_tool_call: true, mcp: { server: "other", tool: "pi_echo" } }]) {
+			expect(bridge.permitsAcpTool(meta)).toBe(false);
+		}
+	});
 	it("authenticates, lists namespaced tools, and revalidates arguments", async () => {
 		const onCall = vi.fn(async ({ arguments: args }) => ({
 			content: [{ type: "text" as const, text: String(args.text) }],
