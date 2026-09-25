@@ -12,3 +12,16 @@ it("removes API credentials and endpoint overrides from child environments", asy
  try { await child.exited; expect(JSON.parse(output)).toEqual([]); }
  finally { await child.close(); }
 });
+
+
+it("removes inherited harness overrides so the qualified runtime selects its bundled harness", async () => {
+ const child = new AntigravityProcess({
+  cwd: process.cwd(), command: process.execPath,
+  args: ["-e", "console.log(JSON.stringify({override:process.env.ANTIGRAVITY_HARNESS_PATH ?? null}))"],
+  env: { ...process.env, ANTIGRAVITY_HARNESS_PATH: "/unqualified/localharness" }
+ });
+ let output = "";
+ child.child.stdout.on("data", chunk => { output += chunk.toString(); });
+ try { await child.exited; expect(JSON.parse(output)).toEqual({ override: null }); }
+ finally { await child.close(); }
+});
